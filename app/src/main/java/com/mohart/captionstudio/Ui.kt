@@ -205,7 +205,7 @@ fun ColumnScope.EditorBody(vm: EditorViewModel, uri: android.net.Uri) {
         Text("${fmtTime(posMs)} / ${fmtTime(duration)}", fontSize = 11.sp)
     }
 
-    val tabs = listOf("Captions", "Styles", "Tweak", "Export")
+    val tabs = listOf("Captions", "Audio", "Styles", "Tweak", "Export")
     TabRow(selectedTabIndex = tab) {
         tabs.forEachIndexed { i, t ->
             Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t, fontSize = 13.sp) })
@@ -214,8 +214,9 @@ fun ColumnScope.EditorBody(vm: EditorViewModel, uri: android.net.Uri) {
     Box(Modifier.weight(1f).fillMaxWidth()) {
         when (tab) {
             0 -> CaptionsTab(vm, { posMs }, seek) { pickSrt.launch(arrayOf("*/*")) }
-            1 -> StylesTab(vm)
-            2 -> TweakTab(vm)
+            1 -> AudioTab(vm)
+            2 -> StylesTab(vm)
+            3 -> TweakTab(vm)
             else -> ExportTab(vm)
         }
     }
@@ -274,13 +275,19 @@ fun CaptionsTab(vm: EditorViewModel, getPos: () -> Long, seek: (Long) -> Unit, o
             OutlinedButton(onClick = onPickSrt) { Text("Import SRT") }
             OutlinedButton(onClick = { vm.addAt(getPos()) }) { Text("+ Add here") }
         }
-        if (vm.captions.isNotEmpty()) {
-            Row(
-                Modifier.padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            Modifier.padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { vm.transcribeAudio() },
+                enabled = !vm.analyzing && !vm.transcribing
             ) {
-                OutlinedButton(onClick = { vm.retimeToSpeech() }, enabled = !vm.analyzing) {
+                Text(if (vm.transcribing) "Transcribing..." else "Transcribe audio")
+            }
+            if (vm.captions.isNotEmpty()) {
+                OutlinedButton(onClick = { vm.retimeToSpeech() }, enabled = !vm.analyzing && !vm.transcribing) {
                     Text(if (vm.analyzing) "Listening..." else "Re-time to speech")
                 }
                 Text("${vm.captions.size} captions", fontSize = 12.sp)
@@ -290,7 +297,8 @@ fun CaptionsTab(vm: EditorViewModel, getPos: () -> Long, seek: (Long) -> Unit, o
         if (vm.captions.isEmpty()) {
             Text(
                 "Paste your script (one caption per line) or import an SRT file. " +
-                    "After pasting, the app listens to the audio and times each line to the speech.",
+                    "After pasting, the app listens to the audio and times each line to the speech. " +
+                    "Or use Transcribe audio to create timed slots from the soundtrack.",
                 fontSize = 13.sp, modifier = Modifier.padding(12.dp)
             )
         }
@@ -370,6 +378,81 @@ fun CaptionCard(vm: EditorViewModel, c: Caption, getPos: () -> Long, seek: (Long
                 }) { Text("End = now", fontSize = 12.sp) }
                 TextButton(onClick = { vm.delete(c.id) }) { Text("Delete", fontSize = 12.sp) }
             }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ Audio tab
+
+@Composable
+fun AudioTab(vm: EditorViewModel) {
+    val pickMusic = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
+        if (u != null) vm.loadMusic(u)
+    }
+    LazyColumn(
+        contentPadding = PaddingValues(12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        item {
+            Text("Background music", fontSize = 16.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Add a music track that plays under the video. It will be mixed into the exported file.",
+                fontSize = 13.sp
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { pickMusic.launch(arrayOf("audio/*")) }) {
+                    Text(if (vm.musicUri == null) "Choose music" else "Change music")
+                }
+                if (vm.musicUri != null) {
+                    OutlinedButton(onClick = { vm.clearMusic() }) { Text("Remove") }
+                }
+            }
+            if (vm.musicUri != null) {
+                Spacer(Modifier.height(6.dp))
+                Text("Music track ready", fontSize = 13.sp)
+            }
+        }
+        item {
+            Text("Music volume", fontSize = 14.sp)
+            Slider(
+                value = vm.musicVolume,
+                onValueChange = { vm.musicVolume = it },
+                valueRange = 0f..1f
+            )
+            Text("${(vm.musicVolume * 100).toInt()}%", fontSize = 12.sp)
+        }
+        item {
+            Text("Original video audio volume", fontSize = 14.sp)
+            Slider(
+                value = vm.originalVolume,
+                onValueChange = { vm.originalVolume = it },
+                valueRange = 0f..1f
+            )
+            Text("${(vm.originalVolume * 100).toInt()}%", fontSize = 12.sp)
+            Text(
+                "Set to 0% to mute the original audio (useful for pure music + captions / lyrics videos).",
+                fontSize = 12.sp
+            )
+        }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FilterChip(
+                    selected = vm.musicLoop,
+                    onClick = { vm.musicLoop = !vm.musicLoop },
+                    label = { Text("Loop music") }
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "When looping is on, the music repeats for the whole video length.",
+                fontSize = 12.sp
+            )
+        }
+        item {
+            vm.notice?.let { Text(it, fontSize = 13.sp) }
         }
     }
 }
@@ -469,17 +552,12 @@ fun TweakTab(vm: EditorViewModel) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { vm.yOverride = 0.16f }) { Text("Top") }
                 OutlinedButton(onClick = { vm.yOverride = 0.5f }) { Text("Middle") }
-                OutlinedButton(onClick = { vm.yOverride = 0.8f }) { Text("Bottom") }
-                TextButton(onClick = { vm.yOverride = null }) { Text("Style default") }
+                OutlinedButton(onClick = { vm.yOverride = 0.78f }) { Text("Bottom") }
             }
         }
         item {
             Text("Entrance animation", fontSize = 14.sp)
-            Spacer(Modifier.height(6.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Anim.values().forEach { a ->
                     FilterChip(
                         selected = (vm.animInOverride ?: base.animIn) == a,
@@ -491,11 +569,7 @@ fun TweakTab(vm: EditorViewModel) {
         }
         item {
             Text("Exit animation", fontSize = 14.sp)
-            Spacer(Modifier.height(6.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 outChoices.forEach { a ->
                     FilterChip(
                         selected = (vm.animOutOverride ?: base.animOut) == a,
@@ -506,41 +580,39 @@ fun TweakTab(vm: EditorViewModel) {
             }
         }
         item {
-            Text("Text color", fontSize = 14.sp)
-            Spacer(Modifier.height(6.dp))
-            ColorRow(selected = vm.colorOverride) { vm.colorOverride = it }
+            Text("Text colour", fontSize = 14.sp)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                palette.forEach { c ->
+                    val selected = (vm.colorOverride ?: base.textColor) == c
+                    Box(
+                        Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(c))
+                            .then(if (selected) Modifier.border(2.dp, Color.White, CircleShape) else Modifier)
+                            .clickable { vm.colorOverride = c }
+                    )
+                }
+            }
         }
         item {
-            Text("Highlight color (word-by-word styles)", fontSize = 14.sp)
-            Spacer(Modifier.height(6.dp))
-            ColorRow(selected = vm.highlightOverride) { vm.highlightOverride = it }
+            Text("Highlight colour", fontSize = 14.sp)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                palette.forEach { c ->
+                    val selected = (vm.highlightOverride ?: base.highlightColor) == c
+                    Box(
+                        Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(c))
+                            .then(if (selected) Modifier.border(2.dp, Color.White, CircleShape) else Modifier)
+                            .clickable { vm.highlightOverride = c }
+                    )
+                }
+            }
         }
         item {
             OutlinedButton(onClick = { vm.resetTweaks() }) { Text("Reset tweaks") }
-        }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-fun ColorRow(selected: Int?, onPick: (Int) -> Unit) {
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        palette.forEach { col ->
-            Box(
-                Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(Color(col))
-                    .border(
-                        if (selected == col) 3.dp else 1.dp,
-                        if (selected == col) MaterialTheme.colorScheme.primary else Color.Gray,
-                        CircleShape
-                    )
-                    .clickable { onPick(col) }
-            )
         }
     }
 }
@@ -551,7 +623,8 @@ fun ColorRow(selected: Int?, onPick: (Int) -> Unit) {
 @Composable
 fun ExportTab(vm: EditorViewModel) {
     val ctx = LocalContext.current
-    val (w, h) = OutputSize.compute(vm.videoInfo, vm.aspect, vm.quality)
+    val info = vm.videoInfo
+    val (w, h) = OutputSize.compute(info, vm.aspect, vm.quality)
     LazyColumn(
         contentPadding = PaddingValues(12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -559,7 +632,7 @@ fun ExportTab(vm: EditorViewModel) {
         item {
             Text("Quality", fontSize = 14.sp)
             Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(720, 1080).forEach { q ->
                     FilterChip(
                         selected = vm.quality == q, onClick = { vm.quality = q },
