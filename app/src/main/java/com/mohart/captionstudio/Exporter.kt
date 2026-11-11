@@ -122,15 +122,12 @@ class Exporter(private val context: Context) {
             .setRemoveAudio(removeOriginalAudio)
             .build()
 
-        val videoSequence = EditedMediaItemSequence.withAudioAndVideoFrom(listOf(videoItem))
+        // Media3 1.5.x API: EditedMediaItemSequence(items) or (items, isLooping)
+        val videoSequence = EditedMediaItemSequence(listOf(videoItem))
 
         val composition: Composition = if (music?.uri != null) {
             val musicItem = EditedMediaItem.Builder(MediaItem.fromUri(music.uri)).build()
-            val musicSeqBuilder = EditedMediaItemSequence.withAudioFrom(listOf(musicItem)).buildUpon()
-            if (music.loop) {
-                musicSeqBuilder.setIsLooping(true)
-            }
-            val musicSequence = musicSeqBuilder.build()
+            val musicSequence = EditedMediaItemSequence(listOf(musicItem), music.loop)
             Composition.Builder(videoSequence, musicSequence).build()
         } else {
             Composition.Builder(videoSequence).build()
