@@ -10,6 +10,14 @@ data class Caption(val id: Long, val startMs: Long, val endMs: Long, val text: S
 
 data class VideoInfo(val durationMs: Long, val width: Int, val height: Int)
 
+/** Background music / audio track settings. */
+data class MusicSettings(
+    val uri: android.net.Uri? = null,
+    val volume: Float = 0.55f,          // music volume 0..1
+    val originalVolume: Float = 1.0f,   // original video audio volume 0..1
+    val loop: Boolean = true
+)
+
 enum class Anim(val label: String) {
     NONE("None"),
     FADE("Fade"),

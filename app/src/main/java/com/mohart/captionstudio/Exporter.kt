@@ -21,6 +21,7 @@ import androidx.media3.effect.TextureOverlay
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
@@ -96,8 +97,15 @@ class Exporter(private val context: Context) {
     private var active = false
 
     fun start(
-        src: Uri, info: VideoInfo, captions: List<Caption>, style: CaptionStyle,
-        aspect: Aspect, quality: Int, fonts: FontLibrary, cb: Callback
+        src: Uri,
+        info: VideoInfo,
+        captions: List<Caption>,
+        style: CaptionStyle,
+        aspect: Aspect,
+        quality: Int,
+        fonts: FontLibrary,
+        music: MusicSettings?,
+        cb: Callback
     ) {
         val (w, h) = OutputSize.compute(info, aspect, quality)
         val renderer = CaptionRenderer(fonts)
@@ -107,9 +115,26 @@ class Exporter(private val context: Context) {
         videoEffects.add(Presentation.createForWidthAndHeight(w, h, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
         videoEffects.add(OverlayEffect(ImmutableList.of<TextureOverlay>(overlay)))
 
-        val edited = EditedMediaItem.Builder(MediaItem.fromUri(src))
+        val removeOriginalAudio = music != null && music.originalVolume <= 0.01f
+
+        val videoItem = EditedMediaItem.Builder(MediaItem.fromUri(src))
             .setEffects(Effects(emptyList(), videoEffects))
+            .setRemoveAudio(removeOriginalAudio)
             .build()
+
+        val videoSequence = EditedMediaItemSequence.withAudioAndVideoFrom(listOf(videoItem))
+
+        val composition: Composition = if (music?.uri != null) {
+            val musicItem = EditedMediaItem.Builder(MediaItem.fromUri(music.uri)).build()
+            val musicSeqBuilder = EditedMediaItemSequence.withAudioFrom(listOf(musicItem)).buildUpon()
+            if (music.loop) {
+                musicSeqBuilder.setIsLooping(true)
+            }
+            val musicSequence = musicSeqBuilder.build()
+            Composition.Builder(videoSequence, musicSequence).build()
+        } else {
+            Composition.Builder(videoSequence).build()
+        }
 
         val bitrate = min(16_000_000, max(3_000_000, (w.toLong() * h * 30 * 0.15).toInt()))
         val encoderFactory = DefaultEncoderFactory.Builder(context)
@@ -122,6 +147,7 @@ class Exporter(private val context: Context) {
 
         val t = Transformer.Builder(context)
             .setVideoMimeType(MimeTypes.VIDEO_H264)
+            .setAudioMimeType(MimeTypes.AUDIO_AAC)
             .setEncoderFactory(encoderFactory)
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(composition: Composition, exportResult: ExportResult) {
@@ -161,7 +187,7 @@ class Exporter(private val context: Context) {
             }
         }
         try {
-            t.start(edited, outFile.absolutePath)
+            t.start(composition, outFile.absolutePath)
             handler.postDelayed(poll, 300)
         } catch (e: Throwable) {
             active = false

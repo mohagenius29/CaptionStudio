@@ -28,9 +28,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     val captions = mutableStateListOf<Caption>()
     var timingVersion by mutableIntStateOf(0)
     var analyzing by mutableStateOf(false)
+    var transcribing by mutableStateOf(false)
     var notice by mutableStateOf<String?>(null)
     private var analysis: SpeechMap? = null
     private var nextId = 1L
+
+    // ---- music / audio track
+    var musicUri by mutableStateOf<Uri?>(null)
+    var musicVolume by mutableFloatStateOf(0.55f)
+    var originalVolume by mutableFloatStateOf(1.0f)
+    var musicLoop by mutableStateOf(true)
 
     // ---- style choice + tweaks
     var styleId by mutableStateOf(StyleLibrary.all.first().id)
@@ -97,6 +104,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         analysis = null
         savedUri = null
         exportMessage = null
+        // keep music if already set
+    }
+
+    fun loadMusic(uri: Uri) {
+        musicUri = uri
+        notice = "Music track added."
+    }
+
+    fun clearMusic() {
+        musicUri = null
+        notice = "Music track removed."
     }
 
     // ---------------------------------------------------------------- captions
@@ -160,6 +178,83 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Scaffold for transcription.
+     * Detects speech regions from the energy map and creates editable caption slots.
+     * Real on-device STT (Whisper / ML Kit / Vosk) can later fill the text of these slots.
+     * For now it creates timed placeholders so you can type the words (or lyrics) quickly.
+     */
+    fun transcribeAudio() {
+        val uri = videoUri ?: return
+        val dur = videoInfo?.durationMs ?: return
+        if (transcribing || analyzing) return
+        viewModelScope.launch {
+            transcribing = true
+            notice = "Analyzing audio for speech regions…"
+            val map = analysis ?: withContext(Dispatchers.Default) {
+                AudioAnalyzer.analyze(ctx, uri, dur)
+            }
+            analysis = map
+
+            // Build caption slots from speech segments (gaps are the pauses)
+            val segments = buildSpeechSegments(map, dur)
+            if (segments.isEmpty()) {
+                notice = "No clear speech regions found. Try pasting text or importing an SRT."
+                transcribing = false
+                return@launch
+            }
+
+            captions.clear()
+            for ((idx, seg) in segments.withIndex()) {
+                val placeholder = if (segments.size == 1) "Type the spoken words or lyrics here"
+                else "Caption ${idx + 1} — type the words here"
+                captions.add(Caption(nextId++, seg.first, seg.second, placeholder))
+            }
+            timingVersion++
+            notice = "Created ${segments.size} timed caption slots from the audio. " +
+                    "Replace the placeholder text with the actual words or lyrics. " +
+                    "Full automatic speech-to-text can be added later with an on-device model."
+            transcribing = false
+        }
+    }
+
+    private fun buildSpeechSegments(map: SpeechMap, durationMs: Long): List<Pair<Long, Long>> {
+        val speechStart = max(0L, map.startMs)
+        val speechEnd = min(durationMs, map.endMs).coerceAtLeast(speechStart + 500)
+        if (map.gaps.isEmpty()) {
+            // No clear pauses → one big segment or a few evenly split
+            val n = 4
+            val len = (speechEnd - speechStart) / n
+            return (0 until n).map { i ->
+                val s = speechStart + i * len
+                val e = if (i == n - 1) speechEnd else s + len
+                s to e
+            }
+        }
+        val segments = ArrayList<Pair<Long, Long>>()
+        var cursor = speechStart
+        for (g in map.gaps) {
+            if (g.first > cursor + 400) {
+                segments.add(cursor to g.first)
+            }
+            cursor = max(cursor, g.last)
+        }
+        if (speechEnd > cursor + 400) {
+            segments.add(cursor to speechEnd)
+        }
+        // Merge very short ones and limit count
+        val merged = ArrayList<Pair<Long, Long>>()
+        for (seg in segments) {
+            if (merged.isNotEmpty() && seg.first - merged.last().second < 300) {
+                val last = merged.removeAt(merged.lastIndex)
+                merged.add(last.first to seg.second)
+            } else if (seg.second - seg.first >= 400) {
+                merged.add(seg)
+            }
+        }
+        return merged.take(40) // safety
+    }
+
     fun updateText(id: Long, text: String) {
         val i = captions.indexOfFirst { it.id == id }
         if (i >= 0) captions[i] = captions[i].copy(text = text)
@@ -203,7 +298,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         savedUri = null
         val ex = Exporter(ctx)
         exporter = ex
-        ex.start(uri, info, captions.toList(), resolvedStyle(), aspect, quality, fonts,
+        val music = if (musicUri != null) {
+            MusicSettings(musicUri, musicVolume, originalVolume, musicLoop)
+        } else null
+        ex.start(uri, info, captions.toList(), resolvedStyle(), aspect, quality, fonts, music,
             object : Exporter.Callback {
                 override fun onProgress(p: Float) {
                     exportProgress = p
